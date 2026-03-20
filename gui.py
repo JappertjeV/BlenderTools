@@ -6,6 +6,7 @@ import os
 import threading
 import sys
 import tempfile
+import json
 
 from settings import settings
 from blender_detect import require_blender, find_blender
@@ -43,7 +44,8 @@ compression_input = []
 output_folder = ""
 compression_output_folder = ""
 all_objects = {}
-object_vars = {}  # dict[str, ctk.BooleanVar]
+object_vars = {}        # dict[str, ctk.BooleanVar]
+marked_objects = {}     # dict[filename, {"front": [...], "back": [...]}]
 
 
 def get_script_path(script_name):
@@ -156,11 +158,15 @@ def schedule_update_check() -> None:
 # ── Render tab ─────────────────────────────────────────────────────────────
 
 def extract_objects_from_blend(blend_file):
+    """
+    Run extract_objects.py inside Blender and return (objects_list, marks_dict).
+    marks_dict = {"front": [...], "back": [...]}
+    """
     try:
         blender_exe = require_blender(app)
     except RuntimeError as e:
         update_status(str(e), "error")
-        return []
+        return [], {"front": [], "back": []}
 
     extract_script = get_script_path("extract_objects.py")
     try:
@@ -173,20 +179,25 @@ def extract_objects_from_blend(blend_file):
         ], capture_output=True, text=True, check=True)
 
         objects = []
+        marks   = {"front": [], "back": []}
+        _skip_prefixes = ('Blender', 'Info', 'Extracted', 'Objects saved to', 'Error', 'Usage', 'BATCH_MARKS:')
+
         for line in result.stdout.split('\n'):
             line = line.strip()
-            if (line
-                    and not line.startswith('Blender')
-                    and not line.startswith('Info')
-                    and not line.startswith('Extracted')
-                    and not line.startswith('Objects saved to')
-                    and not line.startswith('Error')
-                    and not line.startswith('Usage')):
+            if not line:
+                continue
+            if line.startswith('BATCH_MARKS:'):
+                try:
+                    marks = json.loads(line[len('BATCH_MARKS:'):])
+                except Exception:
+                    pass
+            elif not any(line.startswith(p) for p in _skip_prefixes):
                 objects.append(line)
-        return objects
+
+        return objects, marks
     except Exception as e:
         print(f"Error extracting objects from {blend_file}: {e}")
-        return []
+        return [], {"front": [], "back": []}
 
 
 def browse_blend_files():
@@ -207,32 +218,57 @@ def browse_blend_files():
     all_objects = {}
 
     def extract_task():
+        global marked_objects
+        marked_objects = {}
         for bf in selected_files:
-            objs = extract_objects_from_blend(bf)
-            all_objects[os.path.basename(bf)] = objs
+            objs, marks = extract_objects_from_blend(bf)
+            fname = os.path.basename(bf)
+            all_objects[fname]    = objs
+            marked_objects[fname] = marks
         app.after(0, _refresh_object_checkboxes)
-        total = sum(len(v) for v in all_objects.values())
-        update_status(
-            f"Objecten geëxtraheerd uit {len(selected_files)} bestand(en) — {total} objecten gevonden",
-            "success",
+        total       = sum(len(v) for v in all_objects.values())
+        total_marks = sum(
+            len(m.get("front", [])) + len(m.get("back", []))
+            for m in marked_objects.values()
         )
+        msg = f"Objecten geëxtraheerd uit {len(selected_files)} bestand(en) — {total} objecten"
+        if total_marks:
+            msg += f", {total_marks} gemarkeerd (Front/Back)"
+        update_status(msg, "success")
 
     threading.Thread(target=extract_task, daemon=True).start()
 
 
 def _refresh_object_checkboxes():
     global object_vars
-    # Clear existing checkboxes
     for w in objects_scroll_frame.winfo_children():
         w.destroy()
     object_vars = {}
 
     for filename, objs in all_objects.items():
+        marks  = marked_objects.get(filename, {"front": [], "back": []})
+        front_set = set(marks.get("front", []))
+        back_set  = set(marks.get("back",  []))
+
         for obj in objs:
-            label_text = f"{filename}: {obj}"
+            if obj in front_set:
+                label_text = f"{filename}: {obj}  [F]"
+                text_color = ("#c0392b", "#e74c3c")   # rood
+            elif obj in back_set:
+                label_text = f"{filename}: {obj}  [B]"
+                text_color = ("#1a5276", "#3498db")   # blauw
+            else:
+                label_text = f"{filename}: {obj}"
+                text_color = ("gray10", "gray90")
+
             var = ctk.BooleanVar(value=True)
-            cb = ctk.CTkCheckBox(objects_scroll_frame, text=label_text, variable=var,
-                                 command=_update_selection_label)
+            cb  = ctk.CTkCheckBox(
+                objects_scroll_frame,
+                text=label_text,
+                variable=var,
+                text_color=text_color,
+                command=_update_selection_label,
+            )
             cb.pack(anchor="w", padx=5, pady=2)
             object_vars[label_text] = var
 
@@ -441,6 +477,163 @@ def start_compression():
     poll_compress_progress()
 
 
+# ── Flamenco tab ───────────────────────────────────────────────────────────
+
+def _get_flamenco_url():
+    return flamenco_url_var.get().strip() or settings.get("flamenco_manager_url")
+
+
+def test_flamenco_connection():
+    url = _get_flamenco_url()
+    if not url:
+        update_status("Vul een Flamenco Manager URL in.", "warning")
+        return
+
+    settings.set("flamenco_manager_url", url)
+    update_status("Verbinden met Flamenco...", "info")
+    flamenco_connect_btn.configure(state="disabled")
+
+    def _task():
+        try:
+            import urllib.request
+            req = urllib.request.urlopen(f"{url.rstrip('/')}/api/v3/version", timeout=5)
+            data = json.loads(req.read().decode())
+            version = data.get("version", "onbekend")
+            app.after(0, lambda: update_status(f"Verbonden met Flamenco {version}", "success"))
+        except Exception as e:
+            app.after(0, lambda: update_status(f"Kan niet verbinden: {e}", "error"))
+        finally:
+            app.after(0, lambda: flamenco_connect_btn.configure(state="normal"))
+
+    threading.Thread(target=_task, daemon=True).start()
+
+
+def submit_to_flamenco():
+    """Build a material_batch job from the selected marked objects and POST to Flamenco."""
+    if not selected_files:
+        update_status("Selecteer eerst een .blend bestand.", "warning")
+        return
+
+    manager_url = _get_flamenco_url()
+    if not manager_url:
+        update_status("Vul de Flamenco Manager URL in.", "warning")
+        return
+
+    if not output_folder:
+        update_status("Selecteer eerst een output map.", "warning")
+        return
+
+    front_material = flamenco_front_var.get().strip()
+    back_material  = flamenco_back_var.get().strip()
+    mat_library    = flamenco_matlib_var.get().strip()
+
+    if not front_material or not back_material:
+        update_status("Vul de materiaalnames in (Front en Back).", "warning")
+        return
+
+    settings.set("flamenco_manager_url",    manager_url)
+    settings.set("flamenco_front_material", front_material)
+    settings.set("flamenco_back_material",  back_material)
+    settings.set("flamenco_material_library", mat_library)
+
+    # Collect marked objects per blend file
+    jobs_to_submit = []
+    for bf in selected_files:
+        fname  = os.path.basename(bf)
+        marks  = marked_objects.get(fname, {"front": [], "back": []})
+        front  = marks.get("front", [])
+        back   = marks.get("back",  [])
+
+        # Only include objects that are checked in the UI
+        checked = set()
+        for label, var in object_vars.items():
+            if var.get() and label.startswith(f"{fname}:"):
+                # Extract object name (before optional "  [F]" / "  [B]" suffix)
+                raw = label[len(f"{fname}: "):].split("  [")[0]
+                checked.add(raw)
+
+        front = [o for o in front if o in checked]
+        back  = [o for o in back  if o in checked]
+
+        if not front and not back:
+            continue
+
+        mapping = {o: front_material for o in front}
+        mapping.update({o: back_material for o in back})
+
+        # Resolve material library path
+        if mat_library and os.path.isfile(mat_library):
+            mat_lib_path = mat_library
+        else:
+            mat_lib_path = get_script_path("Materialen.blend")
+
+        jobs_to_submit.append({
+            "blend_file":    bf,
+            "mat_lib":       mat_lib_path,
+            "mapping":       mapping,
+            "output_dir":    output_folder,
+            "front_count":   len(front),
+            "back_count":    len(back),
+        })
+
+    if not jobs_to_submit:
+        update_status("Geen gemarkeerde objecten gevonden in de geselecteerde bestanden. Markeer objecten eerst via de Blender plugin.", "warning")
+        return
+
+    flamenco_submit_btn.configure(state="disabled")
+    update_status(f"Verzenden naar Flamenco ({len(jobs_to_submit)} job(s))...", "info")
+
+    def _task():
+        try:
+            import urllib.request
+            submitted = 0
+            for job_info in jobs_to_submit:
+                job = {
+                    "name": f"Batch Render — {os.path.basename(job_info['blend_file'])} "
+                            f"({job_info['front_count']}F + {job_info['back_count']}B)",
+                    "job_type": "material_batch",
+                    "tasks": [{
+                        "name": "render_marked_objects",
+                        "type": "material_batch",
+                        "settings": {
+                            "blend_file":             job_info["blend_file"],
+                            "material_library":       job_info["mat_lib"],
+                            "object_material_mapping": json.dumps(job_info["mapping"]),
+                            "output_directory":       job_info["output_dir"],
+                        },
+                    }],
+                }
+                body = json.dumps(job).encode()
+                req  = urllib.request.Request(
+                    f"{manager_url.rstrip('/')}/api/v3/jobs",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status == 201:
+                        submitted += 1
+
+            app.after(0, lambda: update_status(
+                f"{submitted} job(s) verzonden naar Flamenco!", "success"))
+        except Exception as e:
+            app.after(0, lambda: update_status(f"Fout bij verzenden: {e}", "error"))
+        finally:
+            app.after(0, lambda: flamenco_submit_btn.configure(state="normal"))
+
+    threading.Thread(target=_task, daemon=True).start()
+
+
+def _browse_flamenco_matlib():
+    path = filedialog.askopenfilename(
+        title="Materiaalbibliotheek Kiezen",
+        filetypes=[("Blender bestanden", "*.blend")],
+    )
+    if path:
+        flamenco_matlib_var.set(path)
+        settings.set("flamenco_material_library", path)
+
+
 # ── Settings tab ───────────────────────────────────────────────────────────
 
 def pick_blender_path():
@@ -484,6 +677,7 @@ tabs.pack(fill="both", expand=True, padx=10, pady=10)
 
 tabs.add("Renderen")
 tabs.add("Compressie")
+tabs.add("Flamenco")
 tabs.add("Add-ons")
 tabs.add("Instellingen")
 
@@ -575,6 +769,84 @@ compress_progress.grid_remove()
 # Start button
 ctk.CTkButton(compress_tab, text="Start Compressie", command=start_compression).grid(
     row=6, column=0, columnspan=2, pady=10)
+
+# ── Flamenco tab ───────────────────────────────────────────────────────────
+
+flamenco_tab = tabs.tab("Flamenco")
+flamenco_tab.columnconfigure(1, weight=1)
+
+ctk.CTkLabel(
+    flamenco_tab,
+    text="Flamenco Render Farm",
+    font=ctk.CTkFont(size=16, weight="bold"),
+    anchor="w",
+).grid(row=0, column=0, columnspan=3, sticky="w", padx=15, pady=(15, 2))
+
+ctk.CTkLabel(
+    flamenco_tab,
+    text="Verzend batch render jobs naar een Flamenco Manager. Markeer objecten eerst via de Blender plugin.",
+    text_color="gray",
+    anchor="w",
+    wraplength=680,
+).grid(row=1, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 12))
+
+# Manager URL
+ctk.CTkLabel(flamenco_tab, text="Manager URL:", anchor="w").grid(
+    row=2, column=0, sticky="w", padx=15, pady=4)
+flamenco_url_var = ctk.StringVar(value=settings.get("flamenco_manager_url"))
+ctk.CTkEntry(flamenco_tab, textvariable=flamenco_url_var).grid(
+    row=2, column=1, sticky="ew", padx=(0, 5), pady=4)
+flamenco_connect_btn = ctk.CTkButton(
+    flamenco_tab, text="Verbinden", width=110, command=test_flamenco_connection)
+flamenco_connect_btn.grid(row=2, column=2, padx=(0, 15), pady=4)
+
+# Front material
+ctk.CTkLabel(flamenco_tab, text="Front materiaal:", anchor="w").grid(
+    row=3, column=0, sticky="w", padx=15, pady=4)
+flamenco_front_var = ctk.StringVar(value=settings.get("flamenco_front_material"))
+ctk.CTkEntry(flamenco_tab, textvariable=flamenco_front_var).grid(
+    row=3, column=1, columnspan=2, sticky="ew", padx=(0, 15), pady=4)
+
+# Back material
+ctk.CTkLabel(flamenco_tab, text="Back materiaal:", anchor="w").grid(
+    row=4, column=0, sticky="w", padx=15, pady=4)
+flamenco_back_var = ctk.StringVar(value=settings.get("flamenco_back_material"))
+ctk.CTkEntry(flamenco_tab, textvariable=flamenco_back_var).grid(
+    row=4, column=1, columnspan=2, sticky="ew", padx=(0, 15), pady=4)
+
+# Material library (optional override)
+ctk.CTkLabel(flamenco_tab, text="Materiaalbibliotheek:", anchor="w").grid(
+    row=5, column=0, sticky="w", padx=15, pady=4)
+flamenco_matlib_var = ctk.StringVar(value=settings.get("flamenco_material_library"))
+ctk.CTkEntry(flamenco_tab, textvariable=flamenco_matlib_var,
+             placeholder_text="Leeg = gebruik ingebouwde Materialen.blend").grid(
+    row=5, column=1, sticky="ew", padx=(0, 5), pady=4)
+ctk.CTkButton(flamenco_tab, text="...", width=40, command=_browse_flamenco_matlib).grid(
+    row=5, column=2, padx=(0, 15), pady=4)
+
+# Separator
+ctk.CTkFrame(flamenco_tab, height=2, fg_color="gray30").grid(
+    row=6, column=0, columnspan=3, sticky="ew", padx=15, pady=10)
+
+# Info label
+ctk.CTkLabel(
+    flamenco_tab,
+    text="De geselecteerde .blend bestanden en hun gemarkeerde objecten (via de Renderen-tab) worden gebruikt.",
+    text_color="gray",
+    anchor="w",
+    wraplength=680,
+).grid(row=7, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 10))
+
+# Submit button
+flamenco_submit_btn = ctk.CTkButton(
+    flamenco_tab,
+    text="Verzend naar Flamenco",
+    fg_color="#2d9653",
+    hover_color="#1a6b3c",
+    height=40,
+    command=submit_to_flamenco,
+)
+flamenco_submit_btn.grid(row=8, column=0, columnspan=3, padx=15, pady=10, sticky="ew")
 
 # ── Add-ons tab ────────────────────────────────────────────────────────────
 
