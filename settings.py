@@ -25,8 +25,7 @@ DEFAULTS = {
     "max_file_size_kb": 300,
     "appearance_mode": "dark",
     "flamenco_manager_url": "http://localhost:8080",
-    "flamenco_front_material": "front_material",
-    "flamenco_back_material": "back_material",
+    "flamenco_material_name": "color_material",
     "flamenco_material_library": "",
 }
 

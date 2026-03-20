@@ -228,12 +228,12 @@ def browse_blend_files():
         app.after(0, _refresh_object_checkboxes)
         total       = sum(len(v) for v in all_objects.values())
         total_marks = sum(
-            len(m.get("front", [])) + len(m.get("back", []))
+            len(m.get("selected", []))
             for m in marked_objects.values()
         )
         msg = f"Objecten geëxtraheerd uit {len(selected_files)} bestand(en) — {total} objecten"
         if total_marks:
-            msg += f", {total_marks} gemarkeerd (Front/Back)"
+            msg += f", {total_marks} kleur verander object(en) gevonden"
         update_status(msg, "success")
 
     threading.Thread(target=extract_task, daemon=True).start()
@@ -246,17 +246,13 @@ def _refresh_object_checkboxes():
     object_vars = {}
 
     for filename, objs in all_objects.items():
-        marks  = marked_objects.get(filename, {"front": [], "back": []})
-        front_set = set(marks.get("front", []))
-        back_set  = set(marks.get("back",  []))
+        marks        = marked_objects.get(filename, {"selected": []})
+        selected_set = set(marks.get("selected", []))
 
         for obj in objs:
-            if obj in front_set:
-                label_text = f"{filename}: {obj}  [F]"
-                text_color = ("#c0392b", "#e74c3c")   # rood
-            elif obj in back_set:
-                label_text = f"{filename}: {obj}  [B]"
-                text_color = ("#1a5276", "#3498db")   # blauw
+            if obj in selected_set:
+                label_text = f"{filename}: {obj}  [kleur]"
+                text_color = ("#1a6b3c", "#2d9653")   # groen
             else:
                 label_text = f"{filename}: {obj}"
                 text_color = ("gray10", "gray90")
@@ -509,75 +505,64 @@ def test_flamenco_connection():
 
 
 def submit_to_flamenco():
-    """Build a material_batch job from the selected marked objects and POST to Flamenco."""
+    """Build a material_batch job from selected color-changing objects and POST to Flamenco."""
     if not selected_files:
-        update_status("Selecteer eerst een .blend bestand.", "warning")
+        update_status("Selecteer eerst een .blend bestand via de Renderen-tab.", "warning")
         return
 
-    manager_url = _get_flamenco_url()
+    manager_url  = _get_flamenco_url()
+    material     = flamenco_material_var.get().strip()
+    mat_library  = flamenco_matlib_var.get().strip()
+
     if not manager_url:
         update_status("Vul de Flamenco Manager URL in.", "warning")
         return
-
     if not output_folder:
-        update_status("Selecteer eerst een output map.", "warning")
+        update_status("Selecteer een output map via de Renderen-tab.", "warning")
+        return
+    if not material:
+        update_status("Vul een materiaalnaam in.", "warning")
         return
 
-    front_material = flamenco_front_var.get().strip()
-    back_material  = flamenco_back_var.get().strip()
-    mat_library    = flamenco_matlib_var.get().strip()
-
-    if not front_material or not back_material:
-        update_status("Vul de materiaalnames in (Front en Back).", "warning")
-        return
-
-    settings.set("flamenco_manager_url",    manager_url)
-    settings.set("flamenco_front_material", front_material)
-    settings.set("flamenco_back_material",  back_material)
+    settings.set("flamenco_manager_url",      manager_url)
+    settings.set("flamenco_material_name",    material)
     settings.set("flamenco_material_library", mat_library)
 
-    # Collect marked objects per blend file
+    # Collect checked color-changing objects per blend file
     jobs_to_submit = []
     for bf in selected_files:
-        fname  = os.path.basename(bf)
-        marks  = marked_objects.get(fname, {"front": [], "back": []})
-        front  = marks.get("front", [])
-        back   = marks.get("back",  [])
+        fname        = os.path.basename(bf)
+        marks        = marked_objects.get(fname, {"selected": []})
+        selected_set = set(marks.get("selected", []))
 
-        # Only include objects that are checked in the UI
         checked = set()
         for label, var in object_vars.items():
             if var.get() and label.startswith(f"{fname}:"):
-                # Extract object name (before optional "  [F]" / "  [B]" suffix)
                 raw = label[len(f"{fname}: "):].split("  [")[0]
                 checked.add(raw)
 
-        front = [o for o in front if o in checked]
-        back  = [o for o in back  if o in checked]
-
-        if not front and not back:
+        color_objs = [o for o in selected_set if o in checked]
+        if not color_objs:
             continue
 
-        mapping = {o: front_material for o in front}
-        mapping.update({o: back_material for o in back})
+        mapping = {o: material for o in color_objs}
 
-        # Resolve material library path
-        if mat_library and os.path.isfile(mat_library):
-            mat_lib_path = mat_library
-        else:
-            mat_lib_path = get_script_path("Materialen.blend")
+        mat_lib_path = mat_library if (mat_library and os.path.isfile(mat_library)) \
+                       else get_script_path("Materialen.blend")
 
         jobs_to_submit.append({
-            "blend_file":    bf,
-            "mat_lib":       mat_lib_path,
-            "mapping":       mapping,
-            "output_dir":    output_folder,
-            "front_count":   len(front),
-            "back_count":    len(back),
+            "blend_file": bf,
+            "mat_lib":    mat_lib_path,
+            "mapping":    mapping,
+            "output_dir": output_folder,
+            "count":      len(color_objs),
         })
 
     if not jobs_to_submit:
-        update_status("Geen gemarkeerde objecten gevonden in de geselecteerde bestanden. Markeer objecten eerst via de Blender plugin.", "warning")
+        update_status(
+            "Geen kleur verander objecten gevonden. Selecteer objecten via de Blender plugin.",
+            "warning",
+        )
         return
 
     flamenco_submit_btn.configure(state="disabled")
@@ -590,16 +575,16 @@ def submit_to_flamenco():
             for job_info in jobs_to_submit:
                 job = {
                     "name": f"Batch Render — {os.path.basename(job_info['blend_file'])} "
-                            f"({job_info['front_count']}F + {job_info['back_count']}B)",
+                            f"({job_info['count']} object(en))",
                     "job_type": "material_batch",
                     "tasks": [{
-                        "name": "render_marked_objects",
+                        "name": "render_color_objects",
                         "type": "material_batch",
                         "settings": {
-                            "blend_file":             job_info["blend_file"],
-                            "material_library":       job_info["mat_lib"],
+                            "blend_file":              job_info["blend_file"],
+                            "material_library":        job_info["mat_lib"],
                             "object_material_mapping": json.dumps(job_info["mapping"]),
-                            "output_directory":       job_info["output_dir"],
+                            "output_directory":        job_info["output_dir"],
                         },
                     }],
                 }
@@ -800,42 +785,35 @@ flamenco_connect_btn = ctk.CTkButton(
     flamenco_tab, text="Verbinden", width=110, command=test_flamenco_connection)
 flamenco_connect_btn.grid(row=2, column=2, padx=(0, 15), pady=4)
 
-# Front material
-ctk.CTkLabel(flamenco_tab, text="Front materiaal:", anchor="w").grid(
+# Material name
+ctk.CTkLabel(flamenco_tab, text="Materiaal:", anchor="w").grid(
     row=3, column=0, sticky="w", padx=15, pady=4)
-flamenco_front_var = ctk.StringVar(value=settings.get("flamenco_front_material"))
-ctk.CTkEntry(flamenco_tab, textvariable=flamenco_front_var).grid(
+flamenco_material_var = ctk.StringVar(value=settings.get("flamenco_material_name") or "color_material")
+ctk.CTkEntry(flamenco_tab, textvariable=flamenco_material_var).grid(
     row=3, column=1, columnspan=2, sticky="ew", padx=(0, 15), pady=4)
-
-# Back material
-ctk.CTkLabel(flamenco_tab, text="Back materiaal:", anchor="w").grid(
-    row=4, column=0, sticky="w", padx=15, pady=4)
-flamenco_back_var = ctk.StringVar(value=settings.get("flamenco_back_material"))
-ctk.CTkEntry(flamenco_tab, textvariable=flamenco_back_var).grid(
-    row=4, column=1, columnspan=2, sticky="ew", padx=(0, 15), pady=4)
 
 # Material library (optional override)
 ctk.CTkLabel(flamenco_tab, text="Materiaalbibliotheek:", anchor="w").grid(
-    row=5, column=0, sticky="w", padx=15, pady=4)
+    row=4, column=0, sticky="w", padx=15, pady=4)
 flamenco_matlib_var = ctk.StringVar(value=settings.get("flamenco_material_library"))
 ctk.CTkEntry(flamenco_tab, textvariable=flamenco_matlib_var,
              placeholder_text="Leeg = gebruik ingebouwde Materialen.blend").grid(
-    row=5, column=1, sticky="ew", padx=(0, 5), pady=4)
+    row=4, column=1, sticky="ew", padx=(0, 5), pady=4)
 ctk.CTkButton(flamenco_tab, text="...", width=40, command=_browse_flamenco_matlib).grid(
-    row=5, column=2, padx=(0, 15), pady=4)
+    row=4, column=2, padx=(0, 15), pady=4)
 
 # Separator
 ctk.CTkFrame(flamenco_tab, height=2, fg_color="gray30").grid(
-    row=6, column=0, columnspan=3, sticky="ew", padx=15, pady=10)
+    row=5, column=0, columnspan=3, sticky="ew", padx=15, pady=10)
 
 # Info label
 ctk.CTkLabel(
     flamenco_tab,
-    text="De geselecteerde .blend bestanden en hun gemarkeerde objecten (via de Renderen-tab) worden gebruikt.",
+    text="Gebruik de Renderen-tab om .blend bestanden te laden. Kleur verander objecten (geselecteerd via de Blender plugin) worden automatisch herkend.",
     text_color="gray",
     anchor="w",
     wraplength=680,
-).grid(row=7, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 10))
+).grid(row=6, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 10))
 
 # Submit button
 flamenco_submit_btn = ctk.CTkButton(
@@ -846,7 +824,7 @@ flamenco_submit_btn = ctk.CTkButton(
     height=40,
     command=submit_to_flamenco,
 )
-flamenco_submit_btn.grid(row=8, column=0, columnspan=3, padx=15, pady=10, sticky="ew")
+flamenco_submit_btn.grid(row=7, column=0, columnspan=3, padx=15, pady=10, sticky="ew")
 
 # ── Add-ons tab ────────────────────────────────────────────────────────────
 

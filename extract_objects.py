@@ -16,36 +16,29 @@ def extract_mesh_objects():
 
 def extract_batch_marks():
     """
-    Read Front/Back marks stored by the flamenco_batch_render addon.
+    Read color-changing object selections stored by the flamenco_batch_render addon.
     Falls back to reading object-level custom properties when the addon is absent.
-    Returns {"front": [...], "back": [...]}
+    Returns {"selected": [...]}
     """
     scene = bpy.context.scene
 
-    # Primary: plain JSON custom property written by the addon after each marking action
+    # Primary: plain JSON custom property written by the addon after each selection change
     marks_json = scene.get("batch_render_marks")
     if marks_json:
         try:
             data = json.loads(marks_json)
             return {
-                "front": [n for n in data.get("front", []) if isinstance(n, str)],
-                "back":  [n for n in data.get("back",  []) if isinstance(n, str)],
+                "selected": [n for n in data.get("selected", []) if isinstance(n, str)],
             }
         except Exception:
             pass
 
-    # Fallback: individual object custom properties (legacy / manual)
-    front, back = [], []
-    for obj in scene.objects:
-        if obj.type != 'MESH':
-            continue
-        mark = obj.get("batch_render_type")
-        if mark == "FRONT":
-            front.append(obj.name)
-        elif mark == "BACK":
-            back.append(obj.name)
-
-    return {"front": front, "back": back}
+    # Fallback: individual object custom properties
+    selected = [
+        obj.name for obj in scene.objects
+        if obj.type == 'MESH' and obj.get("batch_render_selected")
+    ]
+    return {"selected": selected}
 
 
 def main():

@@ -2,7 +2,7 @@ import bpy
 
 
 def _draw_object_list(layout, scene):
-    """Draw a selectable list of all mesh objects with Front/Back toggle buttons."""
+    """Draw a selectable list of all mesh objects."""
     mesh_objects = sorted(
         [o for o in scene.objects if o.type == 'MESH'],
         key=lambda o: o.name,
@@ -15,28 +15,24 @@ def _draw_object_list(layout, scene):
     col = layout.column(align=True)
     for obj in mesh_objects:
         row = col.row(align=True)
-        is_front = obj.batch_render_type == 'FRONT'
-        is_back  = obj.batch_render_type == 'BACK'
+        is_selected = obj.batch_render_selected
 
-        # Front button — active (pressed) when marked FRONT
-        op = row.operator("wm.mark_object_front", text="F", depress=is_front)
+        # Checkbox-stijl toggle knop
+        op = row.operator(
+            "wm.toggle_color_object",
+            text="",
+            icon='CHECKBOX_HLT' if is_selected else 'CHECKBOX_DEHLT',
+            depress=is_selected,
+        )
         op.object_name = obj.name
 
-        # Back button — active (pressed) when marked BACK
-        op = row.operator("wm.mark_object_back", text="B", depress=is_back)
-        op.object_name = obj.name
-
-        # Object name — align left
+        # Object naam
         row.label(text=obj.name)
-
-        # Remove button — only if currently marked
-        if obj.batch_render_type != 'NONE':
-            row.operator("wm.unmark_object", text="", icon='X').object_name = obj.name
 
 
 class RENDER_PT_batch_render_marks(bpy.types.Panel):
-    """Main configuration panel in Properties → Output"""
-    bl_label = "Batch Render Marks"
+    """Configuratiepanel in Properties → Output"""
+    bl_label = "Kleur Verander Objecten"
     bl_idname = "RENDER_PT_batch_marks"
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
@@ -47,18 +43,16 @@ class RENDER_PT_batch_render_marks(bpy.types.Panel):
         layout = self.layout
         scene  = context.scene
 
+        selected_objs = [o for o in scene.objects if o.type == 'MESH' and o.batch_render_selected]
+
         # ── Object selectie ────────────────────────────────────────────────
         box = layout.box()
-        front_objs = [o for o in scene.objects if o.type == 'MESH' and o.batch_render_type == 'FRONT']
-        back_objs  = [o for o in scene.objects if o.type == 'MESH' and o.batch_render_type == 'BACK']
-
-        row = box.row()
-        row.label(text=f"Objecten  —  Front: {len(front_objs)}   Back: {len(back_objs)}", icon='OBJECT_DATA')
-
+        box.label(
+            text=f"Kleur verander objecten: {len(selected_objs)}",
+            icon='OBJECT_DATA',
+        )
         _draw_object_list(box, scene)
-
-        row = box.row()
-        row.operator("wm.clear_all_marks", text="Alles Wissen", icon='TRASH')
+        box.operator("wm.clear_all_color_objects", text="Alles Wissen", icon='TRASH')
 
         # ── Flamenco verbinding ────────────────────────────────────────────
         box = layout.box()
@@ -66,13 +60,11 @@ class RENDER_PT_batch_render_marks(bpy.types.Panel):
         box.prop(scene, "flamenco_manager_url")
         box.prop(scene, "batch_open_ui_after_submit")
 
-        # ── Materialen ────────────────────────────────────────────────────
+        # ── Materiaal ─────────────────────────────────────────────────────
         box = layout.box()
-        box.label(text="Materialen", icon='SHADING_MATERIAL')
+        box.label(text="Materiaal", icon='SHADING_MATERIAL')
         box.prop(scene, "batch_material_library")
-        row = box.row(align=True)
-        row.prop(scene, "batch_front_material", text="Front")
-        row.prop(scene, "batch_back_material",  text="Back")
+        box.prop(scene, "batch_material_name")
 
         # ── Renderinstellingen ────────────────────────────────────────────
         box = layout.box()
@@ -80,8 +72,7 @@ class RENDER_PT_batch_render_marks(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(scene, "batch_render_width",  text="B")
         row.prop(scene, "batch_render_height", text="H")
-        row = box.row(align=True)
-        row.prop(scene, "batch_render_engine", text="Engine")
+        box.prop(scene, "batch_render_engine", text="Engine")
         if scene.batch_render_engine == 'CYCLES':
             box.prop(scene, "batch_render_samples")
 
@@ -94,13 +85,17 @@ class RENDER_PT_batch_render_marks(bpy.types.Panel):
         layout.separator()
         row = layout.row()
         row.scale_y = 2.0
-        row.enabled = bool(front_objs or back_objs)
-        row.operator("wm.batch_marks_to_flamenco", text="Verzend naar Flamenco", icon='RENDER_ANIMATION')
+        row.enabled = bool(selected_objs)
+        row.operator(
+            "wm.batch_marks_to_flamenco",
+            text="Verzend naar Flamenco",
+            icon='RENDER_ANIMATION',
+        )
 
 
 class VIEW3D_PT_batch_render_marks(bpy.types.Panel):
-    """Quick-access panel in the 3D Viewport side bar"""
-    bl_label = "Batch Render"
+    """Snel toegangspanel in de 3D Viewport zijbalk"""
+    bl_label = "Kleur Verander Objecten"
     bl_idname = "VIEW3D_PT_batch_marks"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -110,22 +105,19 @@ class VIEW3D_PT_batch_render_marks(bpy.types.Panel):
         layout = self.layout
         scene  = context.scene
 
-        # ── Samenvatting ──────────────────────────────────────────────────
-        front_count = sum(1 for o in scene.objects if o.type == 'MESH' and o.batch_render_type == 'FRONT')
-        back_count  = sum(1 for o in scene.objects if o.type == 'MESH' and o.batch_render_type == 'BACK')
+        selected_count = sum(
+            1 for o in scene.objects if o.type == 'MESH' and o.batch_render_selected
+        )
+        layout.label(
+            text=f"Geselecteerd: {selected_count} object(en)",
+            icon='OBJECT_DATA',
+        )
 
-        row = layout.row()
-        row.label(text=f"Front: {front_count}", icon='SEQUENCE_COLOR_01')
-        row.label(text=f"Back: {back_count}",   icon='SEQUENCE_COLOR_05')
-
-        # ── Object lijst ──────────────────────────────────────────────────
         box = layout.box()
-        box.label(text="Kleur veranderende objecten", icon='OBJECT_DATA')
         _draw_object_list(box, scene)
 
-        # ── Acties ────────────────────────────────────────────────────────
         layout.separator()
-        layout.operator("wm.clear_all_marks", text="Alles Wissen", icon='TRASH')
+        layout.operator("wm.clear_all_color_objects", text="Alles Wissen", icon='TRASH')
 
 
 def register():
