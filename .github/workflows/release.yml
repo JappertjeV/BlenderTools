@@ -1,0 +1,85 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # Create the release first so both build jobs can upload to it
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
+  build-macos:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller BlenderTools.spec
+
+      - name: Zip .app bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd dist
+          zip -r "../BlenderTools-${VERSION}-mac.zip" BlenderTools.app
+          echo "ASSET=BlenderTools-${VERSION}-mac.zip" >> $GITHUB_ENV
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+
+  build-windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller BlenderTools.spec
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Patch version in installer script
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $content = Get-Content installer\BlenderTools.iss -Raw
+          $content = $content -replace 'AppVersion=[\d.]+', "AppVersion=$version"
+          $content = $content -replace 'OutputBaseFilename=[\w.-]+', "OutputBaseFilename=BlenderTools-Setup-$version"
+          Set-Content installer\BlenderTools.iss $content
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc installer\BlenderTools.iss
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/installer/BlenderTools-Setup-*.exe
