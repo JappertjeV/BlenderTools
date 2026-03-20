@@ -25,6 +25,8 @@ a = Analysis(
         ('blender_detect.py', '.'),
         ('version.py', '.'),
         ('updater.py', '.'),
+        ('addon_installer.py', '.'),
+        ('addons', 'addons'),
     ],
     hiddenimports=[
         'customtkinter',

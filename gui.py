@@ -11,6 +11,7 @@ from settings import settings
 from blender_detect import require_blender, find_blender
 from version import __version__
 import updater
+import addon_installer
 
 # Apply saved appearance settings
 ctk.set_appearance_mode(settings.get("appearance_mode") or "dark")
@@ -474,11 +475,16 @@ status_label = ctk.CTkLabel(status_bar, text="Gereed", anchor="w")
 status_label.pack(side="left", padx=10)
 
 # Tab view
-tabs = ctk.CTkTabview(app)
+def _on_tab_change():
+    if tabs.get() == "Add-ons":
+        _refresh_addon_status()
+
+tabs = ctk.CTkTabview(app, command=_on_tab_change)
 tabs.pack(fill="both", expand=True, padx=10, pady=10)
 
 tabs.add("Renderen")
 tabs.add("Compressie")
+tabs.add("Add-ons")
 tabs.add("Instellingen")
 
 # ── Renderen tab ─────────────────────────────────────────────────────────
@@ -569,6 +575,130 @@ compress_progress.grid_remove()
 # Start button
 ctk.CTkButton(compress_tab, text="Start Compressie", command=start_compression).grid(
     row=6, column=0, columnspan=2, pady=10)
+
+# ── Add-ons tab ────────────────────────────────────────────────────────────
+
+addons_tab = tabs.tab("Add-ons")
+addons_tab.columnconfigure(0, weight=1)
+
+# Header
+ctk.CTkLabel(
+    addons_tab,
+    text="Blender Add-ons",
+    font=ctk.CTkFont(size=16, weight="bold"),
+    anchor="w",
+).grid(row=0, column=0, columnspan=2, sticky="w", padx=15, pady=(15, 2))
+
+ctk.CTkLabel(
+    addons_tab,
+    text="Installeer BlenderTools add-ons rechtstreeks in je Blender installatie.",
+    text_color="gray",
+    anchor="w",
+).grid(row=1, column=0, columnspan=2, sticky="w", padx=15, pady=(0, 15))
+
+# ── Flamenco Batch Render card ──────────────────────────────────────────────
+
+addon_card = ctk.CTkFrame(addons_tab)
+addon_card.grid(row=2, column=0, columnspan=2, sticky="ew", padx=15, pady=5)
+addon_card.columnconfigure(0, weight=1)
+
+ctk.CTkLabel(
+    addon_card,
+    text="Flamenco Batch Render",
+    font=ctk.CTkFont(size=13, weight="bold"),
+    anchor="w",
+).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 2))
+
+ctk.CTkLabel(
+    addon_card,
+    text="Markeer objecten als Front/Back en dien batch render jobs in bij Flamenco Manager.",
+    text_color="gray",
+    anchor="w",
+    wraplength=600,
+    justify="left",
+).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+addon_status_label = ctk.CTkLabel(addon_card, text="", anchor="w")
+addon_status_label.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 4))
+
+addon_btn_frame = ctk.CTkFrame(addon_card, fg_color="transparent")
+addon_btn_frame.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 12))
+
+addon_install_btn = ctk.CTkButton(addon_btn_frame, text="Installeren", width=130)
+addon_install_btn.pack(side="left", padx=(0, 8))
+
+addon_remove_btn = ctk.CTkButton(
+    addon_btn_frame, text="Verwijderen", width=130,
+    fg_color="gray40", hover_color="gray30",
+)
+addon_remove_btn.pack(side="left")
+
+
+def _refresh_addon_status():
+    blender_exe = find_blender()
+    if not blender_exe:
+        addon_status_label.configure(text="Blender niet gevonden — stel het pad in via Instellingen.", text_color="gray")
+        addon_install_btn.configure(state="disabled")
+        addon_remove_btn.configure(state="disabled")
+        return
+
+    installed = addon_installer.is_installed(blender_exe)
+    if installed:
+        addon_status_label.configure(text="Status: geïnstalleerd", text_color="#2d9653")
+        addon_install_btn.configure(state="normal", text="Herinstalleren")
+        addon_remove_btn.configure(state="normal")
+    else:
+        addon_status_label.configure(text="Status: niet geïnstalleerd", text_color="gray")
+        addon_install_btn.configure(state="normal", text="Installeren")
+        addon_remove_btn.configure(state="disabled")
+
+
+def _do_addon_install():
+    try:
+        blender_exe = require_blender(app)
+    except RuntimeError as e:
+        update_status(str(e), "error")
+        return
+
+    addon_install_btn.configure(state="disabled")
+    addon_remove_btn.configure(state="disabled")
+    update_status("Add-on installeren...", "info")
+
+    def _task():
+        ok, msg = addon_installer.install(blender_exe)
+        app.after(0, lambda: _on_addon_done(ok, msg))
+
+    threading.Thread(target=_task, daemon=True).start()
+
+
+def _do_addon_remove():
+    try:
+        blender_exe = require_blender(app)
+    except RuntimeError as e:
+        update_status(str(e), "error")
+        return
+
+    addon_install_btn.configure(state="disabled")
+    addon_remove_btn.configure(state="disabled")
+    update_status("Add-on verwijderen...", "info")
+
+    def _task():
+        ok, msg = addon_installer.uninstall(blender_exe)
+        app.after(0, lambda: _on_addon_done(ok, msg))
+
+    threading.Thread(target=_task, daemon=True).start()
+
+
+def _on_addon_done(ok, msg):
+    update_status(msg.replace("\n", " "), "success" if ok else "error")
+    _refresh_addon_status()
+
+
+addon_install_btn.configure(command=_do_addon_install)
+addon_remove_btn.configure(command=_do_addon_remove)
+
+# Initial status check (deferred so Blender detection doesn't block startup)
+app.after(500, _refresh_addon_status)
 
 # ── Instellingen tab ───────────────────────────────────────────────────────
 
