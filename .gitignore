@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environment
+venv/
+
+# Build output
+build/
+dist/
+
+# PyInstaller
+*.spec.bak
+
+# macOS
+.DS_Store
+*.DS_Store
+
+# Temp files
+/tmp/render_progress.txt
+/tmp/render_total.txt
+/tmp/compression_progress.txt
